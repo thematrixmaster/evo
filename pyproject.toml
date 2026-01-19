@@ -28,6 +28,8 @@ dependencies = [
     "abnumber>=0.4.4",
     "pre-commit>=4.2.0",
     "netam>=0.2.1",
+    "promb>=1.0.2",
+    "iglm>=0.1.0",
 ]
 
 [project.optional-dependencies]

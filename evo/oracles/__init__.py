@@ -38,13 +38,15 @@ Example usage:
 
 from typing import Union
 
-from .base import BaseOracle
+from .base import BaseOracle, DifferentiableOracle, GaussianOracle
 from .covid_oracle import CovidOracle
 from .llm_oracle import LLMOracle
 from .rand_oracle import RandOracle
 
 __all__ = [
     "BaseOracle",
+    "DifferentiableOracle",
+    "GaussianOracle",
     "LLMOracle",
     "CovidOracle",
     "RandOracle",

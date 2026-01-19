@@ -4,7 +4,7 @@ Defines the common interface for all protein fitness oracles.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Union
+from typing import List, Union, Tuple
 
 import numpy as np
 
@@ -60,23 +60,56 @@ class BaseOracle(ABC):
             Array of predicted fitness scores, shape (n_sequences,)
         """
 
-    def __call__(self, sequences: Union[str, List[str]]) -> Union[float, np.ndarray]:
-        """Make the oracle callable for convenient inference.
-
-        Parameters
-        ----------
-        sequences : str or List[str]
-            Single sequence or list of sequences
-
-        Returns
-        -------
-        float or np.ndarray
-            Fitness prediction(s)
-        """
-        if isinstance(sequences, str):
-            return self.predict(sequences)
-        else:
-            return self.predict_batch(sequences)
-
     def __repr__(self):
         return f"{self.__class__.__name__}(device='{self.device}')"
+
+
+class GaussianOracle(BaseOracle):
+    """Abstract base class for Gaussian oracles.
+    
+    All Gaussian oracles should inherit from this class and implement
+    the predict() and predict_batch() methods which now return both the mean and variance of the distribution.
+    This is in contrast to the BaseOracle class which only returns the mean.
+    """
+
+    @abstractmethod
+    def predict(self, sequence: str) -> Tuple[float, float]:
+        """Predict fitness for a single protein sequence with uncertainty.
+        Parameters
+        ----------
+        sequence : str
+            Protein sequence as a string
+        Returns
+        -------
+        Tuple[float, float]
+            Tuple of mean fitness score and variance score
+        """
+        pass
+
+    @abstractmethod
+    def predict_batch(self, sequences: List[str]) -> Tuple[np.ndarray, np.ndarray]:
+        """Predict fitness for a batch of protein sequences with uncertainty.
+        Parameters
+        ----------
+        sequences : List[str]
+            List of protein sequences as strings
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            Tuple of mean fitness scores and variance scores, shape (n_sequences,), (n_sequences,)
+        """
+        pass
+
+
+class DifferentiableOracle(BaseOracle):
+    """Abstract base class for differentiable oracles.
+
+    All differentiable oracles should inherit from this class and implement
+    the compute_fitness_gradient() method.
+    """
+
+    @abstractmethod
+    def compute_fitness_gradient(self, sequence: str) -> np.ndarray:
+        """Compute gradients of the predicted fitness w.r.t. one-hot encoding.
+        """
+        
