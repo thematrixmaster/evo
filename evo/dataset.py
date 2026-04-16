@@ -562,6 +562,7 @@ class CherriesDataset(torch.utils.data.Dataset):
         min_t: float = 5e-3,
         max_len: Optional[int] = None,
         quantize_t: bool = False,
+        permute_xy: bool = False,
     ):
         self.data_file = Path(data_file)
         if not self.data_file.exists():
@@ -571,6 +572,7 @@ class CherriesDataset(torch.utils.data.Dataset):
 
         self.min_t = min_t
         self.max_len = max_len
+        self.permute_xy = permute_xy
         self.quantize_t = quantize_t
         self.time_bins = np.array(get_quantization_points_from_geometric_grid(), dtype=np.float32)
 
@@ -586,7 +588,6 @@ class CherriesDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         if self.file is None:
             self.file = ThreadsafeFile(self.data_file, open)
-
         self.file.seek(self.offsets[idx])
         if idx == len(self) - 1:
             data = self.file.read()
@@ -603,6 +604,8 @@ class CherriesDataset(torch.utils.data.Dataset):
         if self.max_len is not None:
             seq1 = seq1[: self.max_len]
             seq2 = seq2[: self.max_len]
+        if self.permute_xy and random.random() < 0.5:
+            seq1, seq2 = seq2, seq1
         return seq1, seq2, t
 
     def __len__(self):
