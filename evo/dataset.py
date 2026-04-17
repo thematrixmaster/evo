@@ -22,6 +22,7 @@ from typing import (
 
 import numba
 import numpy as np
+import pandas as pd
 import pyarrow.parquet as pq
 import torch
 import torch.distributed as dist
@@ -713,6 +714,74 @@ class ComplexCherriesCollection(torch.utils.data.ConcatDataset):
             for f in tqdm(data_files, desc="Loading ComplexCherriesDatasets")
         ]
         super().__init__(datasets)
+
+
+class RankedTripletsDataset(torch.utils.data.Dataset):
+    """Dataset for Direct Preference Optimization training on triplets (x, y1, y2) where
+    x is the anchor, y1 is a positive example preferred over x, and y2 is a decoy less preferred than y1.
+    """
+    def __init__(
+        self,
+        sequences_file: PathLike,
+        anchor_bin_file: PathLike,
+        triplets_file: PathLike,
+        quantized_ts: PathLike,
+        block_size: int = 128,
+    ):
+        super().__init__()
+        self.id_to_seq = self._process_sequences_csv(sequences_file)
+        self.quantized_ts = np.load(quantized_ts).astype(np.float32)
+        self.anchor_bin_ids = self._process_anchor_bin_csv(anchor_bin_file)
+        self.pos_id_arr, self.neg_id_arr, self.group_indices = self._process_triplets_csv(triplets_file)
+        self.block_size = block_size
+
+    def _process_sequences_csv(self, sequences_file: PathLike):
+        seq_df = pd.read_csv(sequences_file)
+        id_to_sequence = dict(zip(seq_df['identifier'].astype(str), seq_df['sequence'].astype(str)))
+        return id_to_sequence
+
+    def _process_anchor_bin_csv(self, anchor_bin_file: PathLike):
+        anchor_bin_df = pd.read_csv(anchor_bin_file)
+        anchor_bin_df = anchor_bin_df[anchor_bin_df["num_triplets"] > 0].reset_index(drop=True)
+        anchor_bin_tuple_list = list(zip(anchor_bin_df['anchor_x'].astype(str), anchor_bin_df['bin_b'].astype(int)))
+        unique_ids = set(anchor_bin_df['anchor_x'].astype(str))
+        max_bin = anchor_bin_df['bin_b'].max()
+        assert unique_ids.issubset(set(self.id_to_seq.keys()))
+        assert max_bin < len(self.quantized_ts)
+        return anchor_bin_tuple_list
+
+    def _process_triplets_csv(self, triplets_file: PathLike):
+        triplets_df = pd.read_csv(triplets_file)
+        anchor_bin_group_indices = triplets_df.groupby(['anchor_x', 'bin_b']).indices
+        positive_y_arr = triplets_df['positive_y1'].values.astype(str)
+        decoy_y_arr = triplets_df['decoy_y2'].values.astype(str)
+        unique_anchor_ids = set(triplets_df['anchor_x'].astype(str))
+        max_bin = triplets_df['bin_b'].max()
+        assert unique_anchor_ids.issubset(set(self.id_to_seq.keys()))
+        assert max_bin < len(self.quantized_ts)   
+        return positive_y_arr, decoy_y_arr, anchor_bin_group_indices
+
+    def __getitem__(self, index):
+        group_key = self.anchor_bin_ids[index]
+        group_indices = self.group_indices[group_key]
+        effective_block_size = min(self.block_size, len(group_indices))
+        sampled_indices = np.random.choice(group_indices, size=effective_block_size, replace=False)
+
+        # get anchor sequence and quantized time for the group
+        anchor_x, bin_idx = group_key
+        anchor_seq = self.id_to_seq[anchor_x]
+        quantized_time = self.quantized_ts[bin_idx]
+
+        # get positive and negative sequences for the sampled triplets
+        positive_seqs = [self.id_to_seq[pid] for pid in self.pos_id_arr[sampled_indices]]
+        negative_seqs = [self.id_to_seq[nid] for nid in self.neg_id_arr[sampled_indices]]
+        return anchor_seq, positive_seqs, negative_seqs, quantized_time
+
+    def __getitems__(self, indices):
+        return [self.__getitem__(i) for i in indices]
+
+    def __len__(self):
+        return len(self.anchor_bin_ids)
 
 
 class FastaDataset(SizedDataset):
