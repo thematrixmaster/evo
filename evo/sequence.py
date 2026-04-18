@@ -86,6 +86,8 @@ HUMAN_CODON_USAGE = {
     "GGG": 16.5,  # Gly
 }
 
+RC_DICT = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C'}
+
 # Get standard genetic code from Biopython
 standard_table = CodonTable.standard_dna_table
 forward_table = standard_table.forward_table
@@ -145,6 +147,20 @@ def get_mutant(mutant: str, wildtype: str) -> str:
     wt = wildtype[idx]
     mt = mutant[idx]
     return f"{wt}{idx}{mt}"
+
+
+def get_mutations(mutant: str, wildtype: str) -> str:
+    """Get all mutations as comma-separated string (e.g., 'A105G,T107S').
+
+    Unlike get_mutant(), this function supports any number of mutations.
+    Returns empty string if sequences are identical.
+    """
+    assert len(mutant) == len(wildtype), "Mutant and wildtype sequences must be of the same length"
+    different_indices = [i for i, (m, w) in enumerate(zip(mutant, wildtype)) if m != w]
+    if len(different_indices) == 0:
+        return ""
+    mutations = [f"{wildtype[i]}{i}{mutant[i]}" for i in different_indices]
+    return ",".join(mutations)
 
 
 def split_mutant_name(mutant: str) -> Tuple[str, int, str]:
@@ -259,7 +275,8 @@ def translate_sequence(nt_sequence):
         raise ValueError(f"The sequence '{nt_sequence}' is not a multiple of 3.")
     aa_seq = "".join(translate_codon(nt_sequence[i : i + 3]) for i in range(0, len(nt_sequence), 3))
     if "*" in aa_seq:
-        raise ValueError(f"The sequence '{nt_sequence}' contains a stop codon.")
+        # print(aa_seq.index("*"))
+        print(f"The sequence '{nt_sequence}' contains a stop codon at position {aa_seq.index('*')}.")
     return aa_seq
 
 
@@ -277,6 +294,9 @@ def backtranslate(aa_sequence: str) -> str:
         KeyError: If an invalid amino acid code is encountered
     """
     return "".join(PREFERRED_CODONS[aa] for aa in aa_sequence.upper())
+
+def rev_comp(seq):
+    return ''.join([RC_DICT[nt] for nt in seq[::-1]])
 
 
 # Example usage:
