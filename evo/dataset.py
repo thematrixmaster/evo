@@ -670,8 +670,8 @@ class ComplexCherriesDataset(CherriesDataset):
 
 
 class ComplexCherriesCollection(torch.utils.data.ConcatDataset):
-    """Concatenation of multiple ComplexCherriesDataset from different files.
-    """
+    """Concatenation of multiple ComplexCherriesDataset from different files."""
+
     def __init__(
         self,
         data_dir: PathLike,
@@ -689,11 +689,11 @@ class ComplexCherriesCollection(torch.utils.data.ConcatDataset):
         if not data_dir.is_dir():
             raise NotADirectoryError(data_dir)
         file_glob = data_dir.glob(f"*.{file_ext}")
-        
+
         if split_files is None and split_file is not None:
             with open(split_file, "r") as f:
                 split_files = set(line.strip() for line in f if line.strip())
-        
+
         data_files = list(file_glob)
         if split_files is not None:
             split_files = set(split_files)
@@ -720,46 +720,73 @@ class RankedTripletsDataset(torch.utils.data.Dataset):
     """Dataset for Direct Preference Optimization training on triplets (x, y1, y2) where
     x is the anchor, y1 is a positive example preferred over x, and y2 is a decoy less preferred than y1.
     """
+
     def __init__(
         self,
         sequences_file: PathLike,
         anchor_bin_file: PathLike,
         triplets_file: PathLike,
         quantized_ts: PathLike,
+        ref_lls_file: PathLike,
         block_size: int = 128,
     ):
         super().__init__()
+        self.block_size = block_size
         self.id_to_seq = self._process_sequences_csv(sequences_file)
         self.quantized_ts = np.load(quantized_ts).astype(np.float32)
         self.anchor_bin_ids = self._process_anchor_bin_csv(anchor_bin_file)
-        self.pos_id_arr, self.neg_id_arr, self.group_indices = self._process_triplets_csv(triplets_file)
-        self.block_size = block_size
+        (
+            self.pos_id_arr,
+            self.neg_id_arr,
+            self.pos_ref_lls,
+            self.neg_ref_lls,
+            self.group_indices,
+        ) = self._process_triplets_csv(triplets_file, ref_lls_file)
 
     def _process_sequences_csv(self, sequences_file: PathLike):
         seq_df = pd.read_csv(sequences_file)
-        id_to_sequence = dict(zip(seq_df['identifier'].astype(str), seq_df['sequence'].astype(str)))
+        id_to_sequence = dict(zip(seq_df["identifier"].astype(str), seq_df["sequence"].astype(str)))
         return id_to_sequence
 
     def _process_anchor_bin_csv(self, anchor_bin_file: PathLike):
         anchor_bin_df = pd.read_csv(anchor_bin_file)
         anchor_bin_df = anchor_bin_df[anchor_bin_df["num_triplets"] > 0].reset_index(drop=True)
-        anchor_bin_tuple_list = list(zip(anchor_bin_df['anchor_x'].astype(str), anchor_bin_df['bin_b'].astype(int)))
-        unique_ids = set(anchor_bin_df['anchor_x'].astype(str))
-        max_bin = anchor_bin_df['bin_b'].max()
+        anchor_bin_tuple_list = list(
+            zip(anchor_bin_df["anchor_x"].astype(str), anchor_bin_df["bin_b"].astype(int))
+        )
+        unique_ids = set(anchor_bin_df["anchor_x"].astype(str))
+        max_bin = anchor_bin_df["bin_b"].max()
         assert unique_ids.issubset(set(self.id_to_seq.keys()))
         assert max_bin < len(self.quantized_ts)
         return anchor_bin_tuple_list
 
-    def _process_triplets_csv(self, triplets_file: PathLike):
+    def _process_triplets_csv(self, triplets_file: PathLike, ref_lls_file: PathLike):
         triplets_df = pd.read_csv(triplets_file)
-        anchor_bin_group_indices = triplets_df.groupby(['anchor_x', 'bin_b']).indices
-        positive_y_arr = triplets_df['positive_y1'].values.astype(str)
-        decoy_y_arr = triplets_df['decoy_y2'].values.astype(str)
-        unique_anchor_ids = set(triplets_df['anchor_x'].astype(str))
-        max_bin = triplets_df['bin_b'].max()
-        assert unique_anchor_ids.issubset(set(self.id_to_seq.keys()))
-        assert max_bin < len(self.quantized_ts)   
-        return positive_y_arr, decoy_y_arr, anchor_bin_group_indices
+        ref_lls_dict = self._process_ref_lls(ref_lls_file)
+        group_indices = triplets_df.groupby(["anchor_x", "bin_b"]).indices
+        x_id_arr = triplets_df["anchor_x"].values.astype(str)
+        pos_id_arr = triplets_df["positive_y1"].values.astype(str)
+        neg_id_arr = triplets_df["decoy_y2"].values.astype(str)
+        bin_idx_arr = triplets_df["bin_b"].values.astype(int)
+        pos_id_tuples = list(zip(x_id_arr, pos_id_arr, bin_idx_arr))
+        neg_id_tuples = list(zip(x_id_arr, neg_id_arr, bin_idx_arr))
+        pos_ref_lls = np.array([ref_lls_dict[tid] for tid in pos_id_tuples])
+        neg_ref_lls = np.array([ref_lls_dict[tid] for tid in neg_id_tuples])
+        assert set(x_id_arr).issubset(set(self.id_to_seq.keys()))
+        assert bin_idx_arr.max() < len(self.quantized_ts)
+        return pos_id_arr, neg_id_arr, pos_ref_lls, neg_ref_lls, group_indices
+
+    def _process_ref_lls(self, ref_lls_file: PathLike):
+        ref_lls_df = pd.read_csv(ref_lls_file)
+        triplet_ids = list(
+            zip(
+                ref_lls_df["x"].astype(str),
+                ref_lls_df["y"].astype(str),
+                ref_lls_df["b"].astype(int),
+            )
+        )
+        ref_lls_dict = dict(zip(triplet_ids, ref_lls_df["ll"].values.astype(np.float32)))
+        return ref_lls_dict
 
     def __getitem__(self, index):
         group_key = self.anchor_bin_ids[index]
@@ -775,7 +802,17 @@ class RankedTripletsDataset(torch.utils.data.Dataset):
         # get positive and negative sequences for the sampled triplets
         positive_seqs = [self.id_to_seq[pid] for pid in self.pos_id_arr[sampled_indices]]
         negative_seqs = [self.id_to_seq[nid] for nid in self.neg_id_arr[sampled_indices]]
-        return anchor_seq, positive_seqs, negative_seqs, quantized_time
+        positive_ref_lls = self.pos_ref_lls[sampled_indices]
+        negative_ref_lls = self.neg_ref_lls[sampled_indices]
+
+        return (
+            anchor_seq,
+            positive_seqs,
+            negative_seqs,
+            quantized_time,
+            positive_ref_lls,
+            negative_ref_lls,
+        )
 
     def __getitems__(self, indices):
         return [self.__getitem__(i) for i in indices]
