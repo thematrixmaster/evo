@@ -716,49 +716,39 @@ class ComplexCherriesCollection(torch.utils.data.ConcatDataset):
         super().__init__(datasets)
 
 
-class RankedTripletsDataset(torch.utils.data.Dataset):
-    """Dataset for Direct Preference Optimization training on triplets (x, y1, y2) where
+class RankedTripletItemDataset(torch.utils.data.Dataset):
+    """Dataset for Direct Preference Optimization that returns individual triplet items (x, y1, y2) where
     x is the anchor, y1 is a positive example preferred over x, and y2 is a decoy less preferred than y1.
     """
 
     def __init__(
         self,
         sequences_file: PathLike,
-        anchor_bin_file: PathLike,
         triplets_file: PathLike,
         quantized_ts: PathLike,
         ref_lls_file: PathLike,
-        block_size: int = 128,
+        fitness_col: str = None,
     ):
         super().__init__()
-        self.block_size = block_size
-        self.id_to_seq = self._process_sequences_csv(sequences_file)
+        self.id_to_seq, self.id_to_fitness = self._process_sequences_csv(sequences_file, fitness_col)
         self.quantized_ts = np.load(quantized_ts).astype(np.float32)
-        self.anchor_bin_ids = self._process_anchor_bin_csv(anchor_bin_file)
         (
+            self.x_id_arr,
             self.pos_id_arr,
             self.neg_id_arr,
+            self.bin_idx_arr,
             self.pos_ref_lls,
             self.neg_ref_lls,
             self.group_indices,
         ) = self._process_triplets_csv(triplets_file, ref_lls_file)
 
-    def _process_sequences_csv(self, sequences_file: PathLike):
+    def _process_sequences_csv(self, sequences_file: PathLike, fitness_col: str = None):
         seq_df = pd.read_csv(sequences_file)
         id_to_sequence = dict(zip(seq_df["identifier"].astype(str), seq_df["sequence"].astype(str)))
-        return id_to_sequence
-
-    def _process_anchor_bin_csv(self, anchor_bin_file: PathLike):
-        anchor_bin_df = pd.read_csv(anchor_bin_file)
-        anchor_bin_df = anchor_bin_df[anchor_bin_df["num_triplets"] > 0].reset_index(drop=True)
-        anchor_bin_tuple_list = list(
-            zip(anchor_bin_df["anchor_x"].astype(str), anchor_bin_df["bin_b"].astype(int))
-        )
-        unique_ids = set(anchor_bin_df["anchor_x"].astype(str))
-        max_bin = anchor_bin_df["bin_b"].max()
-        assert unique_ids.issubset(set(self.id_to_seq.keys()))
-        assert max_bin < len(self.quantized_ts)
-        return anchor_bin_tuple_list
+        id_to_fitness = None
+        if fitness_col is not None:
+            id_to_fitness = dict(zip(seq_df["identifier"].astype(str), seq_df[fitness_col].values.astype(np.float32)))
+        return id_to_sequence, id_to_fitness
 
     def _process_triplets_csv(self, triplets_file: PathLike, ref_lls_file: PathLike):
         triplets_df = pd.read_csv(triplets_file)
@@ -774,7 +764,7 @@ class RankedTripletsDataset(torch.utils.data.Dataset):
         neg_ref_lls = np.array([ref_lls_dict[tid] for tid in neg_id_tuples])
         assert set(x_id_arr).issubset(set(self.id_to_seq.keys()))
         assert bin_idx_arr.max() < len(self.quantized_ts)
-        return pos_id_arr, neg_id_arr, pos_ref_lls, neg_ref_lls, group_indices
+        return x_id_arr, pos_id_arr, neg_id_arr, bin_idx_arr, pos_ref_lls, neg_ref_lls, group_indices
 
     def _process_ref_lls(self, ref_lls_file: PathLike):
         ref_lls_df = pd.read_csv(ref_lls_file)
@@ -787,6 +777,47 @@ class RankedTripletsDataset(torch.utils.data.Dataset):
         )
         ref_lls_dict = dict(zip(triplet_ids, ref_lls_df["ll"].values.astype(np.float32)))
         return ref_lls_dict
+
+    def __getitem__(self, index):
+        anchor_x = self.x_id_arr[index]
+        bin_idx = self.bin_idx_arr[index]
+        y1, y2 = self.pos_id_arr[index], self.neg_id_arr[index]
+        item_id = f"{anchor_x};{y1};{y2};{bin_idx}"
+        return (
+            self.id_to_seq[anchor_x],                   # anchor sequence (x)
+            self.id_to_seq[y1],                         # positive sequence (y1)
+            self.id_to_seq[y2],                         # negative sequence (y2)
+            self.quantized_ts[bin_idx],                 # quantized time (tau)
+            self.pos_ref_lls[index],                    # reference model log p(y1 | x, tau)
+            self.neg_ref_lls[index],                    # reference model log p(y2 | x, tau)
+            item_id,                                    # unique identifier for the triplet item
+        )
+
+    def __len__(self):
+        return len(self.x_id_arr)
+
+
+class RankedTripletsDataset(RankedTripletItemDataset):
+    """Same as RankedTripletItemDataset but returns blocks of triplets from the same anchor and time bin for 
+    block based training where each batch contains multiple triplets for the same (x, b) group.
+    """
+
+    def __init__(self, anchor_bin_file: PathLike, block_size: int = 128, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.block_size = block_size
+        self.anchor_bin_ids = self._process_anchor_bin_csv(anchor_bin_file)
+
+    def _process_anchor_bin_csv(self, anchor_bin_file: PathLike):
+        anchor_bin_df = pd.read_csv(anchor_bin_file)
+        anchor_bin_df = anchor_bin_df[anchor_bin_df["num_triplets"] > 0].reset_index(drop=True)
+        anchor_bin_tuple_list = list(
+            zip(anchor_bin_df["anchor_x"].astype(str), anchor_bin_df["bin_b"].astype(int))
+        )
+        unique_ids = set(anchor_bin_df["anchor_x"].astype(str))
+        max_bin = anchor_bin_df["bin_b"].max()
+        assert unique_ids.issubset(set(self.id_to_seq.keys()))
+        assert max_bin < len(self.quantized_ts)
+        return anchor_bin_tuple_list
 
     def __getitem__(self, index):
         group_key = self.anchor_bin_ids[index]
@@ -813,9 +844,6 @@ class RankedTripletsDataset(torch.utils.data.Dataset):
             positive_ref_lls,
             negative_ref_lls,
         )
-
-    def __getitems__(self, indices):
-        return [self.__getitem__(i) for i in indices]
 
     def __len__(self):
         return len(self.anchor_bin_ids)
