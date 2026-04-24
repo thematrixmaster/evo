@@ -1335,3 +1335,41 @@ class MaskedTokenWrapperDataset(BaseWrapperDataset):
             constant_value=self.vocab.pad_idx,
         )
         return src, tgt
+
+
+class PairwiseRankingDataset(torch.utils.data.Dataset):
+    """Dataset for Bradley-Terry ranking that returns pairs of sequences (winner, loser)."""
+
+    def __init__(self, sequences_file: PathLike, pairs_file: PathLike, fitness_col: str = None):
+        super().__init__()
+        self.id_to_seq, self.id_to_fitness = self._process_sequences_csv(sequences_file, fitness_col)
+        self.winner_id_arr, self.loser_id_arr = self._process_pairs_csv(pairs_file)
+
+    def _process_sequences_csv(self, sequences_file: PathLike, fitness_col: str = None):
+        seq_df = pd.read_csv(sequences_file)
+        id_to_sequence = dict(zip(seq_df["identifier"].astype(str), seq_df["sequence"].astype(str)))
+        id_to_fitness = None
+        if fitness_col is not None:
+            id_to_fitness = dict(zip(seq_df["identifier"].astype(str), seq_df[fitness_col].values.astype(np.float32)))
+        return id_to_sequence, id_to_fitness
+
+    def _process_pairs_csv(self, pairs_file: PathLike):
+        pairs_df = pd.read_csv(pairs_file)
+        winner_id_arr = pairs_df["y1"].values.astype(str)
+        loser_id_arr = pairs_df["y2"].values.astype(str)
+        assert set(winner_id_arr).issubset(set(self.id_to_seq.keys()))
+        assert set(loser_id_arr).issubset(set(self.id_to_seq.keys()))
+        return winner_id_arr, loser_id_arr
+
+    def __getitem__(self, index):
+        winner_id = self.winner_id_arr[index]
+        loser_id = self.loser_id_arr[index]
+        pair_id = f"{winner_id};{loser_id}"
+        return (
+            self.id_to_seq[winner_id],
+            self.id_to_seq[loser_id],
+            pair_id,
+        )
+
+    def __len__(self):
+        return len(self.winner_id_arr)
