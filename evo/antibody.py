@@ -7,8 +7,11 @@ from typing import Dict, List, Optional
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
-from Bio import SeqIO
-from anarci import anarci
+try:
+    from anarci import anarci
+except ImportError:
+    anarci = None
+    print("Warning: ANARCI not found. Germline mapping functions will not work.")
 from abnumber import Chain
 from promb import init_db
 from iglm import IgLM

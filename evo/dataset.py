@@ -849,6 +849,109 @@ class RankedTripletsDataset(RankedTripletItemDataset):
         return len(self.anchor_bin_ids)
 
 
+class KTOPairsDataset(torch.utils.data.Dataset):
+    """Dataset for KTO (Kahneman-Tversky Optimization) training on sequence pairs.
+
+    Loads (x, y, t, x_fit, y_fit) rows from a CSV where y is always more fit than x.
+    Optionally permutes each pair to create (y, x) items, doubling the dataset and
+    providing undesirable examples (modeling a low-fit sequence given a high-fit ancestor).
+
+    Desirability is determined either by pairwise comparison (y_fit > x_fit, default)
+    or by comparing target fitness to the global median. Lambda weights are 1.0 by default,
+    or rank-based if use_rank_lambda=True.
+    """
+
+    def __init__(
+        self,
+        sequences_file: PathLike,
+        pairs_file: PathLike,
+        permute: bool = True,
+        desirability_method: str = "pairwise",
+        use_rank_lambda: bool = False,
+        lambda_range: Tuple[float, float] = (0.5, 1.5),
+        quantize_t: bool = True,
+    ):
+        assert desirability_method in ("pairwise", "median"), \
+            f"desirability_method must be 'pairwise' or 'median', got '{desirability_method}'"
+        self.quantize_t = quantize_t
+        self.time_bins = np.array(get_quantization_points_from_geometric_grid(), dtype=np.float32)
+
+        seq_df = pd.read_csv(sequences_file)
+        id_to_seq = dict(zip(seq_df["identifier"].astype(str), seq_df["sequence"].astype(str)))
+
+        pairs_df = pd.read_csv(pairs_file)
+
+        if desirability_method == "median":
+            fitness_median = float(
+                np.median(np.concatenate([pairs_df["x_fit"].values, pairs_df["y_fit"].values]))
+            )
+
+        items: List[Tuple[str, str, float, float]] = []
+        fit_deltas: List[float] = []
+        for _, row in pairs_df.iterrows():
+            t = float(row["t"])
+            if quantize_t:
+                t = float(get_quantile_idx(self.time_bins, t))
+            x_fit, y_fit = float(row["x_fit"]), float(row["y_fit"])
+            items.append((str(row["x"]), str(row["y"]), t, y_fit))
+            fit_deltas.append(y_fit - x_fit)
+            if permute:
+                items.append((str(row["y"]), str(row["x"]), t, x_fit))
+                fit_deltas.append(x_fit - y_fit)
+
+        self._id_to_seq = id_to_seq
+        self._items = items
+        self._fit_deltas = fit_deltas
+
+        if desirability_method == "pairwise":
+            self._is_desirable = [fd > 0 for fd in fit_deltas]
+        else:
+            self._is_desirable = [fit > fitness_median for _, _, _, fit in items]
+
+        self._lambda_weights = self._compute_lambdas(use_rank_lambda, lambda_range)
+
+    def _compute_lambdas(
+        self, use_rank_lambda: bool, lambda_range: Tuple[float, float]
+    ) -> List[float]:
+        if not use_rank_lambda:
+            return [1.0] * len(self._items)
+
+        lo, hi = lambda_range
+        lambdas = [1.0] * len(self._items)
+
+        des_indices = [i for i, d in enumerate(self._is_desirable) if d]
+        unds_indices = [i for i, d in enumerate(self._is_desirable) if not d]
+
+        def _assign_ranks(indices, ascending: bool):
+            fits = [self._fit_deltas[i] for i in indices]
+            order = sorted(range(len(fits)), key=lambda k: fits[k], reverse=not ascending)
+            n = len(order)
+            for rank, pos in enumerate(order):
+                lam = lo + (hi - lo) * rank / max(n - 1, 1)
+                lambdas[indices[pos]] = lam
+
+        # Desirable: ascending fit_delta → rank 0 = barely desirable → lo, best → hi
+        _assign_ranks(des_indices, ascending=True)
+        # Undesirable: descending fit_delta → rank 0 = barely undesirable → lo, worst → hi
+        _assign_ranks(unds_indices, ascending=False)
+
+        return lambdas
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __getitem__(self, index: int):
+        x_id, y_id, t, target_fit = self._items[index]
+        return (
+            self._id_to_seq[x_id],
+            self._id_to_seq[y_id],
+            t,
+            self._is_desirable[index],
+            self._lambda_weights[index],
+            self._fit_deltas[index],
+        )
+
+
 class FastaDataset(SizedDataset):
     """
     For loading protein sequence datasets in the common FASTA data format
