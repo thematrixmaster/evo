@@ -589,11 +589,18 @@ class CherriesDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         if self.file is None:
             self.file = ThreadsafeFile(self.data_file, open)
-        self.file.seek(self.offsets[idx])
-        if idx == len(self) - 1:
+        # Determine the physical index and whether to swap
+        if self.permute_xy:
+            actual_idx = idx // 2
+            should_swap = (idx % 2 == 1)
+        else:
+            actual_idx = idx
+            should_swap = False
+        self.file.seek(self.offsets[actual_idx])
+        if actual_idx >= (self.offsets.size - 1):
             data = self.file.read()
         else:
-            data = self.file.read(self.offsets[idx + 1] - self.offsets[idx])
+            data = self.file.read(self.offsets[actual_idx + 1] - self.offsets[actual_idx])
         line = data.strip()
         parts = line.split()
         seq1, seq2, t = parts[0], parts[1], str(parts[2])
@@ -605,12 +612,12 @@ class CherriesDataset(torch.utils.data.Dataset):
         if self.max_len is not None:
             seq1 = seq1[: self.max_len]
             seq2 = seq2[: self.max_len]
-        if self.permute_xy and random.random() < 0.5:
+        if should_swap:
             seq1, seq2 = seq2, seq1
         return seq1, seq2, t
 
     def __len__(self):
-        return self.offsets.size
+        return self.offsets.size * 2 if self.permute_xy else self.offsets.size
 
     def _build_index(self):
         offsets = []
@@ -638,11 +645,18 @@ class ComplexCherriesDataset(CherriesDataset):
         if self.file is None:
             self.file = ThreadsafeFile(self.data_file, open)
 
-        self.file.seek(self.offsets[idx])
-        if idx == len(self) - 1:
+        if self.permute_xy:
+            actual_idx = int(idx // 2)
+            should_swap = idx % 2 == 1
+        else:
+            actual_idx = idx
+            should_swap = False
+
+        self.file.seek(self.offsets[actual_idx])
+        if actual_idx >= (self.offsets.size - 1):
             data = self.file.read()
         else:
-            data = self.file.read(self.offsets[idx + 1] - self.offsets[idx])
+            data = self.file.read(self.offsets[actual_idx + 1] - self.offsets[actual_idx])
         line = data.strip()
         parts = line.split()
         seq1, seq2, ts = str(parts[0]), str(parts[1]), parts[2:]
@@ -666,7 +680,13 @@ class ComplexCherriesDataset(CherriesDataset):
                 ts[i] = max(ts[i], self.min_t)
                 ts[i] = get_quantile_idx(self.time_bins, ts[i]) if self.quantize_t else ts[i]
 
+        if should_swap:
+            xs, ys = ys, xs
+
         return xs, ys, ts, chain_ids
+
+    def __len__(self):
+        return self.offsets.size * 2 if self.permute_xy else self.offsets.size
 
 
 class ComplexCherriesCollection(torch.utils.data.ConcatDataset):
@@ -866,6 +886,7 @@ class KTOPairsDataset(torch.utils.data.Dataset):
         sequences_file: PathLike,
         pairs_file: PathLike,
         permute: bool = True,
+        fitness_col: str = None,
         desirability_method: str = "pairwise",
         use_rank_lambda: bool = False,
         lambda_range: Tuple[float, float] = (0.5, 1.5),
@@ -878,6 +899,11 @@ class KTOPairsDataset(torch.utils.data.Dataset):
 
         seq_df = pd.read_csv(sequences_file)
         id_to_seq = dict(zip(seq_df["identifier"].astype(str), seq_df["sequence"].astype(str)))
+
+        self._id_to_fit = None
+        if fitness_col is not None:
+            id_to_fit = dict(zip(seq_df["identifier"].astype(str), seq_df[fitness_col].values.astype(np.float32)))
+            self._id_to_fit = id_to_fit
 
         pairs_df = pd.read_csv(pairs_file)
 
@@ -942,6 +968,7 @@ class KTOPairsDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index: int):
         x_id, y_id, t, target_fit = self._items[index]
+        item_id = f"{x_id};{y_id}"
         return (
             self._id_to_seq[x_id],
             self._id_to_seq[y_id],
@@ -949,6 +976,7 @@ class KTOPairsDataset(torch.utils.data.Dataset):
             self._is_desirable[index],
             self._lambda_weights[index],
             self._fit_deltas[index],
+            item_id,
         )
 
 
