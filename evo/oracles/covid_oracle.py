@@ -46,7 +46,7 @@ class CovidOracle(GaussianOracle, DifferentiableOracle):
     def __init__(
         self,
         variant: str = "SARSCoV1",
-        weights_dir: str = "/scratch/users/stephen.lu/projects/protevo/checkpoints/oracle_weights",
+        weights_dir: str = "/scratch/users/spa-evolution-yss/protevo/checkpoints/oracle_weights",
         device: str = "cuda",
         use_iglm_weighting: bool = False,
         iglm_weight: Optional[float] = None,

@@ -40,8 +40,10 @@ from typing import Union
 
 from .base import BaseOracle, DifferentiableOracle, GaussianOracle
 from .covid_oracle import CovidOracle
+from .esmfold2_oracle import ESMFold2Oracle
 from .llm_oracle import LLMOracle
 from .rand_oracle import RandOracle
+from .tag_predictors import EnergyTAGPredictor, GaussianTAGPredictor, TAGWeightPredictor
 
 __all__ = [
     "BaseOracle",
@@ -49,7 +51,11 @@ __all__ = [
     "GaussianOracle",
     "LLMOracle",
     "CovidOracle",
+    "ESMFold2Oracle",
     "RandOracle",
+    "TAGWeightPredictor",
+    "GaussianTAGPredictor",
+    "EnergyTAGPredictor",
     "get_oracle",
 ]
 
@@ -57,7 +63,7 @@ __all__ = [
 def get_oracle(
     oracle_name: str,
     device: str = "cuda",
-    weights_dir: str = "/scratch/users/stephen.lu/projects/protevo/checkpoints/oracle_weights",
+    weights_dir: str = "/scratch/users/spa-evolution-yss/protevo/checkpoints/oracle_weights",
     **kwargs,
 ) -> BaseOracle:
     """Factory function to instantiate protein fitness oracles.
