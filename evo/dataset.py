@@ -738,20 +738,33 @@ class ComplexCherriesCollection(torch.utils.data.ConcatDataset):
 
 class RankedTripletItemDataset(torch.utils.data.Dataset):
     """Dataset for Direct Preference Optimization that returns individual triplet items (x, y1, y2) where
-    x is the anchor, y1 is a positive example preferred over x, and y2 is a decoy less preferred than y1.
+    x is the anchor, y1 is a positive example, and y2 is a negative example.
     """
 
     def __init__(
         self,
         sequences_file: PathLike,
         triplets_file: PathLike,
-        quantized_ts: PathLike,
-        ref_lls_file: PathLike,
+        quantized_ts: PathLike = None,
+        hardcoded_t: float = None,
+        t_col: str = None,
+        ref_lls_file: PathLike = None,
         fitness_col: str = None,
+        anchor_col: str = "anchor_x",
+        pos_col: str = "positive_y1",
+        neg_col: str = "decoy_y2",
     ):
         super().__init__()
+        self.anchor_col = anchor_col
+        self.pos_col = pos_col
+        self.neg_col = neg_col
+        self.t_col = t_col
+        self.t_arr = None
         self.id_to_seq, self.id_to_fitness = self._process_sequences_csv(sequences_file, fitness_col)
-        self.quantized_ts = np.load(quantized_ts).astype(np.float32)
+        self.quantized_ts = np.load(quantized_ts).astype(np.float32) if quantized_ts is not None else None
+        self.hardcoded_t = hardcoded_t
+        assert self.quantized_ts is not None or self.hardcoded_t is not None or t_col is not None, \
+            "One of quantized_ts, hardcoded_t, or t_col must be provided"
         (
             self.x_id_arr,
             self.pos_id_arr,
@@ -770,20 +783,35 @@ class RankedTripletItemDataset(torch.utils.data.Dataset):
             id_to_fitness = dict(zip(seq_df["identifier"].astype(str), seq_df[fitness_col].values.astype(np.float32)))
         return id_to_sequence, id_to_fitness
 
-    def _process_triplets_csv(self, triplets_file: PathLike, ref_lls_file: PathLike):
+    def _process_triplets_csv(self, triplets_file: PathLike, ref_lls_file: PathLike = None):
         triplets_df = pd.read_csv(triplets_file)
-        ref_lls_dict = self._process_ref_lls(ref_lls_file)
-        group_indices = triplets_df.groupby(["anchor_x", "bin_b"]).indices
-        x_id_arr = triplets_df["anchor_x"].values.astype(str)
-        pos_id_arr = triplets_df["positive_y1"].values.astype(str)
-        neg_id_arr = triplets_df["decoy_y2"].values.astype(str)
-        bin_idx_arr = triplets_df["bin_b"].values.astype(int)
-        pos_id_tuples = list(zip(x_id_arr, pos_id_arr, bin_idx_arr))
-        neg_id_tuples = list(zip(x_id_arr, neg_id_arr, bin_idx_arr))
-        pos_ref_lls = np.array([ref_lls_dict[tid] for tid in pos_id_tuples])
-        neg_ref_lls = np.array([ref_lls_dict[tid] for tid in neg_id_tuples])
+        x_id_arr = triplets_df[self.anchor_col].values.astype(str)
+        pos_id_arr = triplets_df[self.pos_col].values.astype(str)
+        neg_id_arr = triplets_df[self.neg_col].values.astype(str)
+
+        if self.t_col is not None:
+            self.t_arr = triplets_df[self.t_col].values.astype(np.float32)
+
+        if self.quantized_ts is not None:
+            group_indices = triplets_df.groupby([self.anchor_col, "bin_b"]).indices
+            bin_idx_arr = triplets_df["bin_b"].values.astype(int)
+            pos_id_tuples = list(zip(x_id_arr, pos_id_arr, bin_idx_arr))
+            neg_id_tuples = list(zip(x_id_arr, neg_id_arr, bin_idx_arr))
+            assert bin_idx_arr.max() < len(self.quantized_ts)
+        else:
+            group_indices = triplets_df.groupby(self.anchor_col).indices
+            bin_idx_arr = None
+            pos_id_tuples = list(zip(x_id_arr, pos_id_arr))
+            neg_id_tuples = list(zip(x_id_arr, neg_id_arr))
+
+        if ref_lls_file is not None:
+            ref_lls_dict = self._process_ref_lls(ref_lls_file)
+            pos_ref_lls = np.array([ref_lls_dict[tid] for tid in pos_id_tuples])
+            neg_ref_lls = np.array([ref_lls_dict[tid] for tid in neg_id_tuples])
+        else:
+            pos_ref_lls, neg_ref_lls = None, None
+
         assert set(x_id_arr).issubset(set(self.id_to_seq.keys()))
-        assert bin_idx_arr.max() < len(self.quantized_ts)
         return x_id_arr, pos_id_arr, neg_id_arr, bin_idx_arr, pos_ref_lls, neg_ref_lls, group_indices
 
     def _process_ref_lls(self, ref_lls_file: PathLike):
@@ -800,16 +828,29 @@ class RankedTripletItemDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         anchor_x = self.x_id_arr[index]
-        bin_idx = self.bin_idx_arr[index]
         y1, y2 = self.pos_id_arr[index], self.neg_id_arr[index]
-        item_id = f"{anchor_x};{y1};{y2};{bin_idx}"
+
+        if self.quantized_ts is not None:
+            bin_idx = self.bin_idx_arr[index]
+            item_id = f"{anchor_x};{y1};{y2};{bin_idx}"
+            branch_length = self.quantized_ts[bin_idx]
+        elif self.t_arr is not None:
+            item_id = f"{anchor_x};{y1};{y2}"
+            branch_length = float(self.t_arr[index])
+        else:
+            item_id = f"{anchor_x};{y1};{y2}"
+            branch_length = self.hardcoded_t
+
+        pos_ref_ll = self.pos_ref_lls[index] if self.pos_ref_lls is not None else None
+        neg_ref_ll = self.neg_ref_lls[index] if self.neg_ref_lls is not None else None
+
         return (
             self.id_to_seq[anchor_x],                   # anchor sequence (x)
             self.id_to_seq[y1],                         # positive sequence (y1)
             self.id_to_seq[y2],                         # negative sequence (y2)
-            self.quantized_ts[bin_idx],                 # quantized time (tau)
-            self.pos_ref_lls[index],                    # reference model log p(y1 | x, tau)
-            self.neg_ref_lls[index],                    # reference model log p(y2 | x, tau)
+            branch_length,                              # branch length (tau)
+            pos_ref_ll,                                 # reference model log p(y1 | x, tau)
+            neg_ref_ll,                                 # reference model log p(y2 | x, tau)
             item_id,                                    # unique identifier for the triplet item
         )
 
@@ -830,13 +871,18 @@ class RankedTripletsDataset(RankedTripletItemDataset):
     def _process_anchor_bin_csv(self, anchor_bin_file: PathLike):
         anchor_bin_df = pd.read_csv(anchor_bin_file)
         anchor_bin_df = anchor_bin_df[anchor_bin_df["num_triplets"] > 0].reset_index(drop=True)
-        anchor_bin_tuple_list = list(
-            zip(anchor_bin_df["anchor_x"].astype(str), anchor_bin_df["bin_b"].astype(int))
-        )
-        unique_ids = set(anchor_bin_df["anchor_x"].astype(str))
-        max_bin = anchor_bin_df["bin_b"].max()
+        unique_ids = set(anchor_bin_df[self.anchor_col].astype(str))
         assert unique_ids.issubset(set(self.id_to_seq.keys()))
-        assert max_bin < len(self.quantized_ts)
+
+        if self.quantized_ts is not None:
+            anchor_bin_tuple_list = list(zip(
+                anchor_bin_df[self.anchor_col].astype(str),
+                anchor_bin_df["bin_b"].astype(int)
+            ))
+            assert anchor_bin_df["bin_b"].max() < len(self.quantized_ts)
+        else:
+            anchor_bin_tuple_list = list(anchor_bin_df[self.anchor_col].astype(str))
+
         return anchor_bin_tuple_list
 
     def __getitem__(self, index):
@@ -846,20 +892,21 @@ class RankedTripletsDataset(RankedTripletItemDataset):
         sampled_indices = np.random.choice(group_indices, size=effective_block_size, replace=False)
 
         # get anchor sequence and quantized time for the group
-        anchor_x, bin_idx = group_key
-        anchor_seq = self.id_to_seq[anchor_x]
-        quantized_time = self.quantized_ts[bin_idx]
+        if self.quantized_ts is not None:
+            anchor_x, bin_idx = group_key
+            quantized_time = self.quantized_ts[bin_idx]
+        else:
+            anchor_x = group_key
+            quantized_time = self.hardcoded_t
 
-        # get positive and negative sequences for the sampled triplets
-        positive_seqs = [self.id_to_seq[pid] for pid in self.pos_id_arr[sampled_indices]]
-        negative_seqs = [self.id_to_seq[nid] for nid in self.neg_id_arr[sampled_indices]]
-        positive_ref_lls = self.pos_ref_lls[sampled_indices]
-        negative_ref_lls = self.neg_ref_lls[sampled_indices]
+        # get positive and negative sequences for the sampled triplets if available
+        positive_ref_lls = self.pos_ref_lls[sampled_indices] if self.pos_ref_lls is not None else None
+        negative_ref_lls = self.neg_ref_lls[sampled_indices] if self.neg_ref_lls is not None else None
 
         return (
-            anchor_seq,
-            positive_seqs,
-            negative_seqs,
+            self.id_to_seq[anchor_x],
+            [self.id_to_seq[pid] for pid in self.pos_id_arr[sampled_indices]],
+            [self.id_to_seq[nid] for nid in self.neg_id_arr[sampled_indices]],
             quantized_time,
             positive_ref_lls,
             negative_ref_lls,
@@ -1471,10 +1518,21 @@ class MaskedTokenWrapperDataset(BaseWrapperDataset):
 class PairwiseRankingDataset(torch.utils.data.Dataset):
     """Dataset for Bradley-Terry ranking that returns pairs of sequences (winner, loser)."""
 
-    def __init__(self, sequences_file: PathLike, pairs_file: PathLike, fitness_col: str = None):
+    def __init__(
+        self,
+        sequences_file: PathLike,
+        pairs_file: PathLike,
+        fitness_col: str = None,
+        min_fitness_delta: float = None,
+        min_fitness_delta_quantile: float = None,
+    ):
         super().__init__()
         self.id_to_seq, self.id_to_fitness = self._process_sequences_csv(sequences_file, fitness_col)
-        self.winner_id_arr, self.loser_id_arr = self._process_pairs_csv(pairs_file)
+        self.winner_id_arr, self.loser_id_arr = self._process_pairs_csv(
+            pairs_file,
+            min_fitness_delta=min_fitness_delta,
+            min_fitness_delta_quantile=min_fitness_delta_quantile,
+        )
 
     def _process_sequences_csv(self, sequences_file: PathLike, fitness_col: str = None):
         seq_df = pd.read_csv(sequences_file)
@@ -1484,8 +1542,46 @@ class PairwiseRankingDataset(torch.utils.data.Dataset):
             id_to_fitness = dict(zip(seq_df["identifier"].astype(str), seq_df[fitness_col].values.astype(np.float32)))
         return id_to_sequence, id_to_fitness
 
-    def _process_pairs_csv(self, pairs_file: PathLike):
+    def _process_pairs_csv(
+        self,
+        pairs_file: PathLike,
+        min_fitness_delta: float = None,
+        min_fitness_delta_quantile: float = None,
+    ):
         pairs_df = pd.read_csv(pairs_file)
+
+        if min_fitness_delta is not None and min_fitness_delta_quantile is not None:
+            raise ValueError("Only one of min_fitness_delta and min_fitness_delta_quantile can be set.")
+
+        if min_fitness_delta_quantile is not None:
+            if self.id_to_fitness is None:
+                raise ValueError("min_fitness_delta_quantile requires fitness_col.")
+            if not 0.0 <= min_fitness_delta_quantile < 1.0:
+                raise ValueError("min_fitness_delta_quantile must be in [0, 1).")
+
+        if min_fitness_delta is not None and self.id_to_fitness is None:
+            raise ValueError("min_fitness_delta requires fitness_col.")
+
+        if (min_fitness_delta is not None or min_fitness_delta_quantile is not None) and self.id_to_fitness is not None:
+            fitness_deltas = pairs_df.apply(
+                lambda row: self.id_to_fitness[str(row["y1"])] - self.id_to_fitness[str(row["y2"])],
+                axis=1,
+            )
+            threshold = min_fitness_delta
+            threshold_desc = f"absolute threshold {threshold}"
+            if min_fitness_delta_quantile is not None:
+                threshold = float(np.quantile(fitness_deltas, min_fitness_delta_quantile))
+                threshold_desc = (
+                    f"quantile {min_fitness_delta_quantile} "
+                    f"(fitness delta >= {threshold})"
+                )
+
+            pairs_df = pairs_df[fitness_deltas >= threshold].reset_index(drop=True)
+            print(
+                f"Kept {len(pairs_df)} pairs with {threshold_desc}, "
+                f"out of {len(fitness_deltas)} total pairs."
+            )
+
         winner_id_arr = pairs_df["y1"].values.astype(str)
         loser_id_arr = pairs_df["y2"].values.astype(str)
         assert set(winner_id_arr).issubset(set(self.id_to_seq.keys()))
@@ -1496,11 +1592,17 @@ class PairwiseRankingDataset(torch.utils.data.Dataset):
         winner_id = self.winner_id_arr[index]
         loser_id = self.loser_id_arr[index]
         pair_id = f"{winner_id};{loser_id}"
-        return (
+        item = (
             self.id_to_seq[winner_id],
             self.id_to_seq[loser_id],
             pair_id,
         )
+        if self.id_to_fitness is not None:
+            item = item + (
+                self.id_to_fitness[winner_id],
+                self.id_to_fitness[loser_id],
+            )
+        return item
 
     def __len__(self):
         return len(self.winner_id_arr)

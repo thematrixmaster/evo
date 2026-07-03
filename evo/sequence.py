@@ -295,8 +295,53 @@ def backtranslate(aa_sequence: str) -> str:
     """
     return "".join(PREFERRED_CODONS[aa] for aa in aa_sequence.upper())
 
+
 def rev_comp(seq):
     return ''.join([RC_DICT[nt] for nt in seq[::-1]])
+
+
+# Pre-compile the regex pattern globally so it's only built once.
+# Each line corresponds to a rule: capture a k-mer, then check if it repeats.
+# Note: "repeated 6 times" means 1 original occurrence + 5 backreferenced repeats.
+KMER_PATTERN = re.compile(
+    r"(.)\1{5}|"  # k=1 repeated 6 times
+    r"(.{2})\2{3}|"  # k=2 repeated 4 times
+    r"(.{3})\3{2}|"  # k=3 repeated 3 times
+    r"(.{4})\4{2}|"  # k=4 repeated 3 times
+    r"(.{5})\5{2}|"  # k=5 repeated 3 times
+    r"(.{6})\6{2}|"  # k=6 repeated 3 times
+    r"(.{7})\7{1}"  # k=7 repeated 2 times
+)
+
+
+def check_valid_residues(sequences: List[str]) -> List[bool]:
+    """
+    Checks if any sequence contains invalid amino acid residues.
+
+    Args:
+        sequences: A list of protein sequence strings.
+    Returns:
+        A list of booleans. True if the sequence contains valid residues, False otherwise.
+    """
+    # Define a regex pattern for valid amino acids (20 standard).
+    valid_pattern = re.compile(r"^[ACDEFGHIKLMNPQRSTVWY]+$")
+    return [bool(valid_pattern.match(seq)) for seq in sequences]
+
+
+def check_kmer_repetitions(sequences: List[str]) -> List[bool]:
+    """
+    Evaluates a list of protein sequences against k-mer repetition criteria.
+
+    Args:
+        sequences: A list of protein sequence strings.
+
+    Returns:
+        A list of booleans. True if the sequence passes the filter (no bad repeats),
+        False if it fails (contains degenerate repeats).
+    """
+    # re.search returns a Match object if a bad repeat is found, otherwise None.
+    # We want to return True when the result is None (i.e., sequence is valid).
+    return [KMER_PATTERN.search(seq) is None for seq in sequences]
 
 
 # Example usage:
